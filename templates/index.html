@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="{{ app_cfg.theme_color }}" />
+  <meta name="description" content="{{ app_cfg.app_description }}" />
+  <title>{{ app_cfg.app_title }}</title>
+
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem("deffen.theme.v1");
+        var doc = document.documentElement;
+        if (t === "light" || t === "dark") {
+          doc.setAttribute("data-theme", t);
+          doc.setAttribute("data-ui-theme", t);
+        } else {
+          doc.setAttribute("data-theme", "system");
+          doc.setAttribute(
+            "data-ui-theme",
+            window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches
+              ? "light"
+              : "dark"
+          );
+        }
+      } catch (e) {}
+    })();
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+    rel="stylesheet"
+  />
+
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  <link rel="icon" type="image/png" href="{{ url_for('static', filename=app_cfg.favicon) }}" />
+  <link rel="apple-touch-icon" href="{{ url_for('static', filename=app_cfg.favicon) }}" />
+</head>
+
+<body>
+  <!-- Boot / loading screen -->
+  <div class="loading-screen" id="loadingScreen" role="status" aria-live="polite">
+    <img
+      class="loading-logo"
+      src="{{ url_for('static', filename=app_cfg.logo) }}"
+      alt="{{ app_cfg.app_name }}"
+      width="76"
+      height="76"
+    />
+    <span class="loading-spinner" aria-hidden="true"></span>
+    <p class="loading-text">{{ app_cfg.loading_text }}</p>
+  </div>
+
+  <div class="app" id="app">
+    <aside class="sidebar" id="sidebar" aria-label="Conversations">
+      <div class="sidebar-head">
+        <button class="brand" id="brand" type="button" data-tooltip="{{ app_cfg.app_name }}" title="{{ app_cfg.app_name }} — start new chat">
+          <span class="brand-mark" aria-hidden="true">
+            <img class="brand-logo" src="{{ url_for('static', filename=app_cfg.logo) }}" alt="" width="28" height="28" />
+          </span>
+          <span class="brand-text">
+            <span class="brand-name">{{ app_cfg.app_name }}</span>
+            <span class="brand-tag">{{ app_cfg.app_tagline }}</span>
+          </span>
+        </button>
+
+        <div class="sidebar-head-tools">
+          <button class="icon-btn sidebar-search-toggle" id="sidebarSearchToggle" type="button" data-tooltip="Search" title="Search conversations" aria-label="Search conversations" aria-expanded="false" aria-controls="sidebarSearch">
+            <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+              <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8" />
+              <path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            </svg>
+          </button>
+          <button class="icon-btn sidebar-collapse" id="sidebarCollapseBtn" type="button" data-tooltip="Collapse sidebar" title="Collapse sidebar" aria-label="Collapse sidebar" aria-expanded="true" aria-controls="sidebar">
+            <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+              <rect x="3" y="4.5" width="18" height="15" rx="3" fill="none" stroke="currentColor" stroke-width="1.7" />
+              <path d="M9.5 4.5v15" stroke="currentColor" stroke-width="1.7" />
+            </svg>
+          </button>
+          <button class="icon-btn sidebar-close" id="sidebarClose" type="button" title="Close sidebar" aria-label="Close sidebar">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="sidebar-actions">
+        <button id="newChatSidebarBtn" class="btn-new" type="button" data-tooltip="New chat" title="Start a new chat">
+          <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+            <path d="M16.9 3.6a2 2 0 0 1 2.8 2.8l-9.9 9.9-3.8.9.9-3.8 9.9-9.8Z" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" />
+            <path d="m15 5.4 3.6 3.6" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" />
+          </svg>
+          <span>{{ app_cfg.sidebar_new_chat }}</span>
+        </button>
+      </div>
+
+      <div class="sidebar-search" id="sidebarSearch">
+        <svg class="search-icon" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+          <circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8" />
+          <path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+        </svg>
+        <input id="chatSearch" type="search" placeholder="Search conversations" aria-label="Search conversations" autocomplete="off" />
+      </div>
+
+      <nav class="sidebar-nav" id="sidebarNav" aria-label="Primary">
+        <button class="sidebar-nav-item" id="navNewChat" type="button" data-tooltip="New chat" title="New chat">
+          <span class="sidebar-nav-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" /></svg>
+          </span>
+          <span class="sidebar-nav-label">New chat</span>
+        </button>
+
+        <a class="sidebar-nav-item" id="navHome" href="/" data-tooltip="Home" title="Home">
+          <span class="sidebar-nav-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18"><path d="M4 10.6 12 4l8 6.6V20a1 1 0 0 1-1 1h-3.8v-5.6H9.8V21H5a1 1 0 0 1-1-1v-9.4Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" /></svg>
+          </span>
+          <span class="sidebar-nav-label">Home</span>
+        </a>
+
+        <a class="sidebar-nav-item active" id="navChat" href="/chat" aria-current="page" data-tooltip="Chat" title="Chat">
+          <span class="sidebar-nav-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18"><path d="M20 12.2a7.4 7.4 0 0 1-7.5 7.3H7.6L4 21.5l.9-4A7.4 7.4 0 0 1 12.5 4.9 7.4 7.4 0 0 1 20 12.2Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" /></svg>
+          </span>
+          <span class="sidebar-nav-label">Chat</span>
+        </a>
+
+        <button class="sidebar-nav-item" id="navSearch" type="button" data-tooltip="Search chats" title="Search chats">
+          <span class="sidebar-nav-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.8" /><path d="m16 16 4.5 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" /></svg>
+          </span>
+          <span class="sidebar-nav-label">Search chats</span>
+        </button>
+
+      </nav>
+
+      <div class="sidebar-scroll">
+        <p class="section-label" id="chatSectionLabel">Recents</p>
+        <nav class="chat-list" id="chatList" aria-label="Recent chats"></nav>
+      </div>
+
+      
+    </aside>
+
+    <div class="sidebar-overlay" id="sidebarOverlay" hidden></div>
+
+    <div class="main">
+      <header class="topbar">
+        <button class="icon-btn menu-btn" id="menuBtn" type="button" title="Open sidebar" aria-label="Open sidebar">
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+            <path d="M4 6.5h16M4 12h16M4 17.5h16" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+          </svg>
+        </button>
+
+        <div class="topbar-title" id="topbarTitle">
+          <span class="topbar-name">{{ app_cfg.app_name }}</span>
+          <span class="topbar-chat" id="topbarChat">New chat</span>
+        </div>
+
+        <div class="topbar-actions">
+          <button id="newChatBtn" class="btn-new btn-new-inline" type="button" title="Start a new chat">
+            <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+              <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
+            </svg>
+            <span>{{ app_cfg.sidebar_new_chat }}</span>
+          </button>
+        </div>
+      </header>
+
+      <main class="chat-area" id="chatArea">
+        <section class="empty-state" id="emptyState">
+          <div class="hero-mark" aria-hidden="true">
+            <img class="hero-logo" src="{{ url_for('static', filename=app_cfg.logo) }}" alt="" width="64" height="64" />
+          </div>
+          <h2 class="welcome-title">{{ app_cfg.welcome_title }}</h2>
+          <p class="welcome-sub">{{ app_cfg.welcome_sub }}</p>
+
+          <div class="suggestions" id="suggestions">
+            <button class="chip" type="button" data-prompt="explain me about yourself">
+              <span class="chip-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 7.5V12l3 2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></span>
+              <span class="chip-text"><strong>Explain something</strong><small>Break down a tricky idea</small></span>
+            </button>
+            <button class="chip" type="button" data-prompt="Help me write a simple code">
+              <span class="chip-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16"><path d="m8 8-3.5 4L8 16M16 8l3.5 4L16 16M13.5 5l-3 14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+              <span class="chip-text"><strong>Help me code</strong><small>Write or fix code</small></span>
+            </button>
+            <button class="chip" type="button" data-prompt="write a simple poem">
+              <span class="chip-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M4 6h16v12H4V6Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="m4 7 8 6 8-6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+              <span class="chip-text"><strong>Write something</strong><small>Draft an email or post</small></span>
+            </button>
+            <button class="chip" type="button" data-prompt="Brainstorm a new life idea">
+              <span class="chip-icon" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 3.5a6 6 0 0 0-6 6c0 2.4 1.5 4 2.8 5.4.8.9 1.2 1.7 1.2 2.6h4c0-.9.4-1.7 1.2-2.6 1.3-1.4 2.8-3 2.8-5.4a6 6 0 0 0-6-6Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M10 20h4M11.5 16.5V20" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></span>
+              <span class="chip-text"><strong>Brainstorm an idea</strong><small>Explore a new concept</small></span>
+            </button>
+          </div>
+        </section>
+
+        <div class="messages" id="messageList" aria-live="polite"></div>
+      </main>
+
+      <button class="scroll-bottom" id="scrollBottomBtn" type="button" title="Scroll to newest message" hidden>
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <path d="M12 5v14m0 0 6-6m-6 6-6-6" stroke="currentColor" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </button>
+
+      <footer class="composer-wrap">
+        <div class="composer" id="composer">
+          <textarea
+            id="userInput"
+            rows="1"
+            maxlength="8000"
+            autocomplete="off"
+            placeholder="{{ app_cfg.composer_placeholder }}"
+            aria-label="{{ app_cfg.composer_placeholder }}"
+          ></textarea>
+          <button id="sendBtn" class="send-btn" type="button" title="Send message (Enter)" disabled>
+            <svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true">
+              <path d="M3.5 11.2 20 4.3 16.4 19.6 11.8 14.4 3.5 11.2Z" fill="currentColor" />
+            </svg>
+          </button>
+        </div>
+      </footer>
+    </div>
+
+    <div class="modal-backdrop" id="settingsModal" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle">
+        <div class="modal-head">
+          <h3 id="settingsModalTitle">Settings</h3>
+          <button class="icon-btn" id="settingsCloseBtn" type="button" title="Close settings" aria-label="Close settings">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <path d="m6 6 12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-label">Appearance</span>
+              <span class="setting-hint">Choose how {{ app_cfg.app_name }} looks on this device</span>
+            </div>
+            <div class="theme-picker" id="themePicker" role="radiogroup" aria-label="Theme">
+              <button type="button" class="theme-option" data-theme-option="light" title="Light">
+                <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="12" cy="12" r="4.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.5v2.2M12 19.3v2.2M21.5 12h-2.2M4.7 12H2.5M18.7 5.3l-1.6 1.6M6.9 17.1l-1.6 1.6M18.7 18.7l-1.6-1.6M6.9 6.9 5.3 5.3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+              </button>
+              <button type="button" class="theme-option" data-theme-option="dark" title="Dark">
+                <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5a8.5 8.5 0 1 0 10.7 10.7Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+              </button>
+              <button type="button" class="theme-option" data-theme-option="system" title="System">
+                <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><rect x="3" y="4.5" width="18" height="12.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9 20.5h6M12 17v3.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-label">Conversations</span>
+              <span class="setting-hint" id="settingSessionCount">Stored in this browser</span>
+            </div>
+            <button class="btn-ghost danger" id="clearSessionsBtn" type="button">Clear all</button>
+          </div>
+          <p class="settings-note">
+            {{ app_cfg.brand_note }}
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

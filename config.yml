@@ -1,0 +1,73 @@
+# =============================================================================
+# Deffen AI — Application configuration (YAML)
+# -----------------------------------------------------------------------------
+# All runtime settings for the Flask app live here. Edit this file and restart
+# the server to apply changes. The API key is used server-side only and is
+# NEVER exposed to the browser.
+# =============================================================================
+
+app:
+  # Brand / metadata
+  name: "Deffen AI"
+  tagline: "by Dev. Muntahi"
+  title: "Deffen AI"
+  description: "Deffen AI — an independent AI assistant created by (Dev. Muntahi)."
+  theme_color: "#0f1115"
+  favicon: "media/img/fav/favicon.png"
+  logo: "media/img/fav/favicon.png"
+
+  # Copy / UI strings
+  loading_text: "Loading Deffen AI…"
+  welcome_title: "Deffen AI"
+  welcome_sub: "Your independent AI assistant."
+  composer_placeholder: "Message Deffen AI..."
+  sidebar_new_chat: "New chat"
+  brand_note: "Deffen AI is an independent AI assistant built by Dev Muntahi. Your conversations stay in this browser and are never uploaded anywhere."
+
+  # Session / conversation settings
+  max_history_messages: 31     # system prompt + up to 30 most recent messages
+
+  # Owner website referenced in the system prompt
+  owner_website: "https://muntahi.devs.surf/"
+
+ai:
+  # OpenRouter API key — server-side only. NEVER ship this to the frontend.
+  api_key: "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"
+
+  # Primary chat completions endpoint
+  endpoint: "https://api.openrouter.ai/v1/chat/completions"
+
+  # Fallback endpoints tried in order if a network error occurs
+  fallbacks:
+    - "https://openrouter.ai/api/v1/chat/completions"
+
+  # Model identifier
+  model: "inclusionai/ling-3.0-flash-sante:free"
+
+  # Request timeout in milliseconds
+  timeout_ms: 120000
+
+  # System prompt for the assistant
+  system_prompt: |
+    You are Deffen AI, an independent AI assistant powered by an external AI and created by Muntahi.
+    Your owner's official website is https://muntahi.devs.surf/.
+    You are not ChatGPT, OpenAI, Google Gemini, or a product of any other company.
+    You are the AI assistant operating within the Deffen AI application.
+    If someone asks who you are, clearly state that you are Deffen AI, an AI assistant powered through an Brilliant brain.
+    If someone asks who created you, say that you were created by Muntahi and provide the owner's official website https://muntahi.devs.surf/ when relevant.
+    If someone asks how you work, explain that Deffen AI sends requests through its configured AI Brilliant brain and returns the generated response to the user.
+    Do not falsely claim to be a standalone model, company, or human.
+    If someone asks about adult content, explain that access to such features is restricted and only available to specifically authorized users.
+    Be helpful, precise, thoughtful, and honest.
+    Always respond in the same language the user uses.
+    dont explain about you without the user asking
+
+server:
+  # Flask server settings
+  host: "127.0.0.1"
+  port: 5000
+  # Debug mode MUST stay disabled in production (it can leak source paths).
+  debug: false
+
+  # Secret key used for Flask sessions / signing (change in production)
+  secret_key: "change-me-to-a-random-secret"
