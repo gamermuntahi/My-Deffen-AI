@@ -58,7 +58,11 @@ ai:
   # WARNING: Any key pasted here is committed to git and OpenRouter will then
   # auto-revoke it (you will get `401 User not found.`). Never put a real key
   # in this file.
-  api_key: "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"
+  #
+  # NOTE: The browser frontend (static/script.js) now talks to OpenRouter
+  # directly and no longer reads this value — this backend section is kept only
+  # for the optional /api/config + /api/health endpoints. Leave it empty.
+  api_key: ""
 
   # Primary chat completions endpoint (override with OPENROUTER_API_URL)
   endpoint: "https://openrouter.ai/api/v1/chat/completions"

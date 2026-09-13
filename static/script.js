@@ -1,14 +1,54 @@
-// Backend-provided AI configuration.
-// NOTE: No API settings (key, URL, model, system prompt, timeout) are hardcoded
-// here. They are managed by the backend (config.yml / environment variables)
-// and fetched at runtime from this app's own /api/config endpoint. The browser
-// then performs the actual AI request itself using those settings.
-const CONFIG_ENDPOINT = "/api/config";
+/* ============================================================================
+ * DEFFEN AI — FRONTEND AI CONFIGURATION
+ * ----------------------------------------------------------------------------
+ * The AI request is made DIRECTLY from the browser to OpenRouter:
+ *
+ *     Browser  ──>  OpenRouter API  ──>  AI response  ──>  Browser
+ *
+ * Nothing here goes through the Flask backend, so there is NO dependency on
+ * /api/config, on a user account, on a session, or on the database. The only
+ * thing that matters is that the values below are correct.
+ *
+ * 👉 PASTE YOUR NEW OPENROUTER API KEY BELOW (OPENROUTER_API_KEY).
+ *
+ * SECURITY NOTE: because this is a pure frontend, the key is visible to anyone
+ * who opens the page source / network tab. Use a dedicated, rate-limited key
+ * and never reuse a key that has ever been committed to a repository — such
+ * keys get auto-revoked by OpenRouter and return `401 User not found.`.
+ * ==========================================================================*/
+const OPENROUTER_API_KEY = "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";
 
-// Cached AI configuration returned by the backend (null until first loaded).
-let aiConfig = null;
-// In-flight config request, shared so concurrent callers reuse one fetch.
-let aiConfigPromise = null;
+// OpenRouter chat-completions endpoint (correct host/path — do not change
+// unless OpenRouter publishes a new one).
+const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
+
+// Model identifier shown on https://openrouter.ai/models
+const OPENROUTER_MODEL = "nex-agi/nex-n2.5-pro:free";
+
+// Request timeout in milliseconds.
+const REQUEST_TIMEOUT_MS = 120000;
+
+// How many recent messages (plus the system prompt) to send to the model.
+const MAX_HISTORY_MESSAGES = 30;
+
+// Optional CORS proxy. Leave "" — OpenRouter already sends the CORS headers
+// the browser needs. Only set this if you are forced to tunnel the request.
+const CORS_PROXY = "";
+
+// System prompt — edit freely. Defines the Deffen AI identity.
+const SYSTEM_PROMPT =
+  "You are Deffen AI, an independent AI assistant powered by an external AI and created by Muntahi. " +
+  "Your owner's official website is https://muntahi.devs.surf/. " +
+  "You are not ChatGPT, OpenAI, Google Gemini, or a product of any other company. " +
+  "You are the AI assistant operating within the Deffen AI application. " +
+  "If someone asks who you are, clearly state that you are Deffen AI, an AI assistant powered through an Brilliant brain. " +
+  "If someone asks who created you, say that you were created by Muntahi and provide the owner's official website https://muntahi.devs.surf/ when relevant. " +
+  "If someone asks how you work, explain that Deffen AI sends requests through its configured AI Brilliant brain and returns the generated response to the user. " +
+  "Do not falsely claim to be a standalone model, company, or human. " +
+  "If someone asks about adult content, explain that access to such features is restricted and only available to specifically authorized users. " +
+  "Be helpful, precise, thoughtful, and honest. " +
+  "Always respond in the same language the user uses." +
+  "dont explain about you without the user asking";
 
 const history = [];
 let busy = false;
@@ -100,9 +140,11 @@ const el = (tag, cls, text) => {
 
 const hideEmptyState = () => emptyState?.remove();
 
-// Bot avatar uses the Deffen AI logo served from Flask's static folder.
+// Bot avatar. Uses the app-relative public asset path (identical file to the
+// Flask-served one) so it keeps working when the frontend is hosted directly
+// on Vercel without the Flask static route.
 const BOT_LOGO =
-  '<img class="msg-logo" src="/static/media/img/fav/favicon.png" alt="" width="18" height="18" />';
+  '<img class="msg-logo" src="static/media/img/fav/favicon.png" alt="" width="18" height="18" />';
 
 // Keep the boot/loading screen visible for at least this long (ms).
 const LOADING_MIN_MS = 3000;
@@ -220,9 +262,6 @@ function init() {
   updateSettings();
   input.focus();
 
-  // Fetch the backend-managed AI settings eagerly so the first message is fast.
-  // Errors are surfaced when the user actually sends a message.
-  prefetchAiConfig().catch(() => {});
 
   // UI-only additions: theme controls + visible viewport handling
   if (themePicker && rootEl.hasAttribute("data-theme")) {
@@ -861,11 +900,12 @@ async function sendMessage(textOverride) {
 }
 
 
-// Collect the visible conversation and prepend the backend-managed system
-// prompt. The history cap comes from the backend config as well.
+// Collect the visible conversation (the existing `history` array, restored
+// from localStorage sessions) and prepend the frontend SYSTEM_PROMPT.
+// The system prompt is always kept; only the recent messages are capped.
 function buildMessages() {
   const msgs = [];
-  const systemPrompt = String(aiConfig?.system_prompt ?? "").trim();
+  const systemPrompt = String(SYSTEM_PROMPT || "").trim();
   if (systemPrompt) msgs.push({ role: "system", content: systemPrompt });
 
   for (const m of history) {
@@ -874,7 +914,7 @@ function buildMessages() {
     msgs.push({ role: m.role === "assistant" ? "assistant" : "user", content });
   }
 
-  const maxHistory = Number(aiConfig?.max_history_messages);
+  const maxHistory = Number(MAX_HISTORY_MESSAGES);
   if (maxHistory > 0 && msgs.length > maxHistory) {
     const hasSystem = msgs[0]?.role === "system";
     const head = hasSystem ? [msgs[0]] : [];
@@ -884,76 +924,35 @@ function buildMessages() {
   return msgs;
 }
 
-// Fetch the AI settings that the backend owns and cache them. The backend is
-// the single source of truth; nothing here is hardcoded.
-function prefetchAiConfig() {
-  if (aiConfig) return Promise.resolve(aiConfig);
-  if (aiConfigPromise) return aiConfigPromise;
-
-  aiConfigPromise = (async () => {
-    let res;
-    try {
-      res = await fetch(CONFIG_ENDPOINT, {
-        headers: { Accept: "application/json" },
-        cache: "no-store",
-      });
-    } catch (err) {
-      aiConfigPromise = null;
-      const e = new Error(
-        "Could not reach the assistant configuration service. " +
-          "Please check your connection and try again."
-      );
-      e.isConfigError = true;
-      throw e;
-    }
-
-    let data = null;
-    try {
-      data = await res.json();
-    } catch {
-      data = null;
-    }
-
-    if (!res.ok || !data) {
-      aiConfigPromise = null;
-      const e = new Error(
-        "The assistant configuration is currently unavailable. " +
-          "Please try again in a moment."
-      );
-      e.status = res.status;
-      e.isConfigError = true;
-      throw e;
-    }
-
-    if (!data.configured) {
-      aiConfigPromise = null;
-      const e = new Error(
-        "The AI assistant is not configured yet. " +
-          "The service owner needs to set the API key, URL and model."
-      );
-      e.isConfigError = true;
-      throw e;
-    }
-
-    aiConfig = data;
-    return aiConfig;
-  })();
-
-  return aiConfigPromise;
+// The HTTP-Referer sent to OpenRouter must be a real http(s) URL. When the app
+// runs from a file:// page we fall back to the production site.
+function httpReferrer() {
+  if (typeof location !== "undefined" && /^https?:/i.test(location.protocol)) {
+    return location.href;
+  }
+  return "https://deffen.ai/";
 }
 
-// Pull the human-readable error text out of a provider response body.
-function extractErrorDetail(body) {
-  if (!body) return "";
-  if (typeof body === "string") return body.slice(0, 300);
-  if (typeof body === "object") {
-    const err = body.error;
-    if (typeof err === "string") return err;
-    if (err && typeof err.message === "string") return err.message;
-    if (typeof body.message === "string") return body.message;
-    if (typeof body.detail === "string") return body.detail;
-  }
-  return "";
+// True for browser-level fetch failures (CORS, DNS, offline, connection reset)
+// rather than a structured HTTP response from OpenRouter.
+function isNetworkError(err) {
+  if (!err) return false;
+  const name = String(err.name || "");
+  const msg = String(err.message || "");
+  return (
+    name === "TypeError" ||
+    /failed to fetch|load failed|networkerror|network error|econn|offline|internet/i.test(msg)
+  );
+}
+
+// Optional CORS-proxy URL builder (only used when CORS_PROXY is set).
+function applyProxy(baseEndpoint) {
+  const proxy = String(CORS_PROXY || "").trim();
+  if (!proxy || !/^https?:\/\//i.test(proxy)) return baseEndpoint;
+  const encoded = encodeURIComponent(baseEndpoint);
+  return proxy.includes("{url}")
+    ? proxy.replace("{url}", encoded)
+    : proxy.replace(/\/+$/, "") + "?url=" + encoded;
 }
 
 // Read a single reply text out of an OpenRouter-compatible response.
@@ -974,99 +973,134 @@ function extractContent(data) {
   return null;
 }
 
-// Perform the actual AI request from the browser using backend-provided
-// settings. The endpoint failover and timeout also come from the backend.
+// Perform ONE request against an OpenRouter-compatible endpoint and return the
+// assistant's reply text. Throws on HTTP errors, empty bodies or bad payloads.
+async function fetchOnce(url, messages) {
+  let res;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization:
+          "Bearer " +
+          String(OPENROUTER_API_KEY || "")
+            .replace(/^\s*bearer\s+/i, "")
+            .trim(),
+        "HTTP-Referer": httpReferrer(),
+        "X-Title": "Deffen AI",
+      },
+      body: JSON.stringify({
+        model: OPENROUTER_MODEL,
+        messages,
+      }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS || 120000),
+    });
+  } catch (err) {
+    if (err && err.name === "TimeoutError") {
+      throw new Error(
+        "The request timed out. The model may be busy — please try again."
+      );
+    }
+    throw err;
+  }
+
+  if (!res.ok) {
+    let detail = "";
+    try {
+      const j = await res.json();
+      detail = (j && j.error && j.error.message) || (j && j.message) || "";
+    } catch {}
+    if (!detail) {
+      try {
+        detail = (await res.text()).slice(0, 240);
+      } catch {}
+    }
+    const err = new Error(
+      detail || "OpenRouter responded with HTTP " + res.status + "."
+    );
+    err.status = res.status;
+    throw err;
+  }
+
+  const body = await res.text();
+  if (!body) throw new Error("OpenRouter returned an empty response.");
+
+  let data;
+  try {
+    data = JSON.parse(body);
+  } catch {
+    throw new Error("OpenRouter returned a malformed response.");
+  }
+
+  if (data && data.error) {
+    const err = new Error(
+      (data.error && data.error.message) || "OpenRouter returned an error."
+    );
+    err.status = data.error && data.error.code;
+    throw err;
+  }
+
+  const content = extractContent(data);
+  if (content == null) {
+    throw new Error("OpenRouter returned an unexpected response.");
+  }
+  return String(content);
+}
+
+// Call OpenRouter DIRECTLY from the browser (Browser -> OpenRouter -> Browser).
+// There is no backend, no /api/config, no user/session/database lookup.
+// Fallback order: configured endpoint, the canonical OpenRouter URL, then the
+// optional CORS proxy. Only network/CORS/timeout failures trigger a retry; a
+// real HTTP status is surfaced to the user immediately.
 async function requestReply(messages) {
-  const cfg = await prefetchAiConfig();
+  const key = String(OPENROUTER_API_KEY || "")
+    .replace(/^\s*bearer\s+/i, "")
+    .trim();
 
-  const endpoints = [cfg.endpoint]
-    .concat(Array.isArray(cfg.fallbacks) ? cfg.fallbacks : [])
-    .filter((u) => typeof u === "string" && /^https?:\/\//i.test(u));
-
-  if (!endpoints.length) {
-    const e = new Error("The AI endpoint is not configured correctly.");
+  if (!key || key === "PASTE_NEW_KEY_HERE") {
+    const e = new Error(
+      "No OpenRouter API key is set. Open static/script.js and paste your key " +
+        'into OPENROUTER_API_KEY (replace "PASTE_NEW_KEY_HERE").'
+    );
     e.isConfigError = true;
     throw e;
   }
 
-  // The backend normalizes the key, but guard here too so a stray "Bearer"
-  // prefix can never produce a double-prefixed (rejected) Authorization header.
-  const apiKey = String(cfg.api_key || "")
-    .replace(/^\s*bearer\s+/i, "")
-    .trim();
-  const headers = {
-    "Content-Type": "application/json",
-    Authorization: "Bearer " + apiKey,
-  };
-  if (cfg.referer) headers["HTTP-Referer"] = cfg.referer;
-  if (cfg.title) headers["X-Title"] = cfg.title;
+  const primary = String(OPENROUTER_ENDPOINT || "").trim();
+  if (!/^https?:\/\//i.test(primary)) {
+    const e = new Error("The OpenRouter endpoint is not configured correctly.");
+    e.isConfigError = true;
+    throw e;
+  }
 
-  const timeoutMs = Number(cfg.timeout_ms) > 0 ? Number(cfg.timeout_ms) : 120000;
-  const payload = {
-    model: cfg.model,
-    messages,
-  };
+  const endpoints = [primary];
+  const canonical = "https://openrouter.ai/api/v1/chat/completions";
+  if (!endpoints.includes(canonical)) endpoints.push(canonical);
+  if (String(CORS_PROXY || "").trim()) endpoints.push(applyProxy(primary));
 
-  let lastNetworkError = null;
+  let lastError = null;
 
   for (const url of endpoints) {
-    let res;
     try {
-      res = await fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(timeoutMs),
-      });
+      return await fetchOnce(url, messages);
     } catch (err) {
-      if (err && err.name === "TimeoutError") {
-        throw new Error(
-          "The request timed out. The model may be busy — please try again."
-        );
+      // A structured HTTP error (401/402/403/404/429/5xx) is final — retrying
+      // another URL would only repeat it. Only retry on transport failures.
+      if (!isNetworkError(err) && !(err && err.name === "TimeoutError")) {
+        throw err;
       }
-      // Network-level failure: try the next endpoint, if any.
-      lastNetworkError = err;
-      continue;
+      lastError = err;
     }
-
-    let data = null;
-    try {
-      data = await res.json();
-    } catch {
-      data = null;
-    }
-
-    if (!res.ok) {
-      const detail =
-        extractErrorDetail(data) ||
-        "The assistant service responded with HTTP " + res.status + ".";
-      const err = new Error(String(detail));
-      err.status = res.status;
-      throw err;
-    }
-
-    if (data && data.error) {
-      const err = new Error(
-        extractErrorDetail(data) || "The assistant returned an error."
-      );
-      if (data.error && typeof data.error.code === "number") {
-        err.status = data.error.code;
-      }
-      throw err;
-    }
-
-    const content = extractContent(data);
-    if (typeof content !== "string") {
-      throw new Error("The assistant returned an unexpected response.");
-    }
-    return content;
   }
 
   const e = new Error(
-    "Deffen AI could not reach its assistant service. " +
-      "This is usually a temporary network issue. Please try again."
+    "Deffen AI could not reach OpenRouter. This is usually a temporary network " +
+      "issue, or the browser was blocked from calling OpenRouter directly (CORS). " +
+      "Please check your connection and try again."
   );
-  e.cause = lastNetworkError;
+  e.isCors = true;
+  e.cause = lastError;
   throw e;
 }
 
@@ -1074,43 +1108,68 @@ function classifyError(err) {
   const msg = String(err?.message || err || "");
   const status = Number(err?.status) || 0;
 
-  // Backend-managed configuration could not be loaded or is incomplete.
+  // The frontend config itself is incomplete / unusable.
   if (err && err.isConfigError) {
     return {
-      title: "Assistant unavailable",
+      title: "Assistant not configured",
       detail: msg,
     };
   }
 
-  if (status === 401 || status === 403 || /api key|apikey|invalid.*key|unauthorized|forbidden|authentication|permission/i.test(msg)) {
+  // 401 — invalid or missing key. 403 — key blocked / provider refused.
+  if (
+    status === 401 ||
+    status === 403 ||
+    /api key|apikey|invalid.*key|unauthorized|forbidden|authentication|permission/i.test(msg)
+  ) {
     return {
       title: "Access denied",
       detail:
-        "The AI service could not verify this session. Please contact the developer if this keeps happening.\n\n" + msg,
+        "OpenRouter rejected the request. The API key is invalid, disabled, or " +
+        "this origin is not allowed.\n\n" +
+        msg,
     };
   }
 
+  // 402 — the OpenRouter account is out of credits.
   if (status === 402 || /402|insufficient|credits|balance|billing/i.test(msg)) {
     return {
-      title: "Service unavailable",
+      title: "Insufficient credits",
       detail:
-        "The AI assistant is temporarily unavailable. Please try again later.\n\n" + msg,
+        "The OpenRouter account has run out of credits. Top up the account and " +
+        "try again.\n\n" +
+        msg,
     };
   }
 
+  // 429 — rate limit reached.
   if (status === 429 || /429|rate limit|too many requests/i.test(msg)) {
     return {
       title: "Too many requests",
       detail:
-        "Deffen AI is receiving a lot of requests right now. Wait a moment and try again.\n\n" + msg,
+        "OpenRouter rate limit reached. Wait a moment and try again.\n\n" + msg,
     };
   }
 
-  if (status === 404 || /404|not found|does not exist|no model|model/i.test(msg)) {
+  // 404 — model or endpoint not found.
+  if (status === 404 || /404|not found|does not exist|no model|unknown model/i.test(msg)) {
     return {
-      title: "Assistant unavailable",
+      title: "Model unavailable",
       detail:
-        "The AI assistant could not be reached. Please try again later.\n\n" + msg,
+        "OpenRouter could not find the configured model or endpoint. Check " +
+        "OPENROUTER_MODEL and OPENROUTER_ENDPOINT in static/script.js.\n\n" +
+        msg,
+    };
+  }
+
+  // 400 / 422 — the request body or model name was rejected as invalid.
+  if (status === 400 || status === 422 || /bad request|invalid request|malformed/i.test(msg)) {
+    return {
+      title: "Request rejected",
+      detail:
+        "OpenRouter rejected the request as invalid. This usually means the " +
+        "model name or request body is incorrect.\n\n" +
+        msg,
     };
   }
 
@@ -1136,9 +1195,9 @@ function classifyError(err) {
         "Your device appears to be offline. Check your internet connection and try again.";
     } else {
       detail =
-        "Deffen AI could not reach its assistant service. This is usually a temporary " +
-        "network issue — or the browser was blocked from calling the AI service directly. " +
-        "Please check your connection and try again.";
+        "Deffen AI could not reach OpenRouter. This is usually a temporary " +
+        "network issue — or the browser was blocked from calling OpenRouter " +
+        "directly (CORS). Please check your connection and try again.";
     }
     detail += "\n\n" + msg;
     return { title: "Connection error", detail };
@@ -1146,9 +1205,9 @@ function classifyError(err) {
 
   if (status >= 500) {
     return {
-      title: "Assistant temporarily unavailable",
+      title: "AI service temporarily unavailable",
       detail:
-        "Deffen AI's assistant service is having issues right now. " +
+        "OpenRouter (or the model provider) is having issues right now. " +
         "Please try again shortly.\n\n" + msg,
     };
   }
