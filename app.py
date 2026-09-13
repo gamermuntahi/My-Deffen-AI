@@ -1,23 +1,62 @@
 """
 Deffen AI — Flask application.
 
-Loads all configuration from config.yml and serves the chat UI while proxying
-AI requests to the configured OpenRouter endpoint server-side, so the API key
-never leaves the server.
+All runtime configuration is owned by the backend. The AI settings (API key,
+API URL, model, timeout, system prompt, ...) are read from config.yml and/or
+environment variables and handed to the browser through the tiny, no-cache
+``/api/config`` endpoint. The browser then performs the actual AI request
+itself, so no AI setting is hardcoded in the frontend JavaScript and no
+server-side file is ever exposed to the client.
+
+Production (Vercel) configuration
+---------------------------------
+Set the following project environment variables (Production scope!):
+
+    OPENROUTER_API_KEY   = sk-or-v1-...        (required)
+    OPENROUTER_API_URL   = https://openrouter.ai/api/v1/chat/completions
+    OPENROUTER_MODEL     = <model id>
+
+Never commit a real key. For local development you can either export the same
+variables or put them in an untracked ``config.local.yml`` file, which is
+merged on top of config.yml.
 """
 
 import logging
 import os
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
-import requests
 import yaml
 from flask import Flask, abort, jsonify, render_template, request
-from werkzeug.exceptions import BadRequest
 
-CONFIG_PATH = "config.yml"
+# Resolve config files next to this file so the app works regardless of the
+# current working directory (local dev and Vercel serverless share this).
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.environ.get("DEFFEN_CONFIG") or os.path.join(BASE_DIR, "config.yml")
+# Optional, untracked local override (never committed; local development only).
+LOCAL_CONFIG_PATH = (
+    os.environ.get("DEFFEN_LOCAL_CONFIG")
+    or os.path.join(BASE_DIR, "config.local.yml")
+)
 
+# ---------------------------------------------------------------------------
+# Logging.
+#
+# Serverless platforms only surface logs that are actually emitted. We attach a
+# stdout handler and default to INFO so configuration problems are visible in
+# the Vercel function logs — without ever printing the API key itself.
+# ---------------------------------------------------------------------------
 log = logging.getLogger("deffen")
+if not log.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s [deffen] %(message)s")
+    )
+    log.addHandler(_handler)
+try:
+    log.setLevel(os.environ.get("DEFFEN_LOG_LEVEL", "INFO").upper())
+except ValueError:  # pragma: no cover - defensive
+    log.setLevel(logging.INFO)
+log.propagate = False
 
 
 # ---------------------------------------------------------------------------
@@ -25,7 +64,8 @@ log = logging.getLogger("deffen")
 # ---------------------------------------------------------------------------
 # Files that must never be reachable over HTTP, regardless of location.
 BLOCKED_FILENAMES = {
-    "config.yml", "config.yaml", "config.json", "config.ini", "config.cfg",
+    "config.yml", "config.yaml", "config.local.yml", "config.local.yaml",
+    "config.json", "config.ini", "config.cfg",
     "settings.py", "secrets.yml", "secrets.yaml", "secret.txt", "secrets.txt",
     "app.py", "database.py", "db.py", "models.py", "manage.py", "wsgi.py",
     "asgi.py", "requirements.txt", "pipfile", "pipfile.lock", "poetry.lock",
@@ -56,6 +96,24 @@ ALLOWED_STATIC_EXTENSIONS = {
     ".mp3", ".mp4", ".webm", ".ogg", ".wav",
 }
 
+# The only backend endpoint the browser may call to obtain AI settings.
+AI_CONFIG_ROUTE = "/api/config"
+
+# The exact keys the browser is allowed to receive from /api/config. Anything a
+# deployment adds for diagnostics is stripped before the response is sent.
+CLIENT_CONFIG_KEYS = (
+    "endpoint",
+    "fallbacks",
+    "api_key",
+    "model",
+    "timeout_ms",
+    "system_prompt",
+    "referer",
+    "title",
+    "max_history_messages",
+    "configured",
+)
+
 
 def _fully_unquote(value, rounds=4):
     """Decode percent-encoding repeatedly to catch double-encoded traversal."""
@@ -78,6 +136,10 @@ def is_blocked_path(raw_path):
         return False
     if "\x00" in path:
         return True
+
+    # The config API is an intentional, safe exception.
+    if path.rstrip("/") == AI_CONFIG_ROUTE:
+        return False
 
     normalized = path.replace("\\", "/")
     if ".." in normalized:
@@ -113,51 +175,322 @@ def is_allowed_static_request(path):
     return ext in ALLOWED_STATIC_EXTENSIONS
 
 
+# ---------------------------------------------------------------------------
+# Configuration loading (cached, reloaded when a file changes on disk so it
+# stays editable from the backend without a manual restart).
+# ---------------------------------------------------------------------------
+_config_cache = {"config": None, "stamp": None}
+
+
+def _merge(base, override):
+    """Recursively merge ``override`` on top of ``base`` (returns a new dict).
+
+    Blank override values are ignored:
+
+    * ``None`` - produced by a bare ``key:`` line, e.g. a section like ``ai:``
+      that is left with only comments underneath it.
+    * an empty/whitespace string - e.g. a placeholder ``api_key: ""``.
+
+    Without this, an empty ``config.local.yml`` (or one with a commented-out
+    section) would overwrite real values from ``config.yml`` with ``None`` and
+    silently break the AI configuration (empty endpoint/model/key). An override
+    file must only replace keys it actually sets to a meaningful value.
+    """
+    merged = dict(base)
+    for key, value in (override or {}).items():
+        if isinstance(value, dict):
+            merged[key] = _merge(merged.get(key) or {}, value)
+        elif value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        else:
+            merged[key] = value
+    return merged
+
+
 def load_config(path=CONFIG_PATH):
-    """Load the YAML configuration file."""
-    with open(path, "r", encoding="utf-8") as fh:
-        cfg = yaml.safe_load(fh) or {}
+    """Load config.yml, then merge the optional untracked local override."""
+    cfg = {}
+    if path and os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh) or {}
+
+    if LOCAL_CONFIG_PATH and os.path.exists(LOCAL_CONFIG_PATH):
+        try:
+            with open(LOCAL_CONFIG_PATH, "r", encoding="utf-8") as fh:
+                cfg = _merge(cfg, yaml.safe_load(fh) or {})
+        except (OSError, yaml.YAMLError) as exc:
+            log.warning("Ignoring local config override: %s", exc)
     return cfg
 
 
-CONFIG = load_config()
+def _config_stamp():
+    """Fingerprint the config files (path + mtime) for cache invalidation."""
+    stamp = []
+    for path in (CONFIG_PATH, LOCAL_CONFIG_PATH):
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            stamp.append((path, os.path.getmtime(path)))
+        except OSError:  # pragma: no cover - defensive
+            continue
+    return tuple(stamp)
 
 
-class AIResponseError(Exception):
-    """Raised when the upstream AI service returns an error."""
+def get_config():
+    """Return the current config, reloading it when the files change."""
+    stamp = _config_stamp()
+    if _config_cache["config"] is not None and _config_cache["stamp"] == stamp:
+        return _config_cache["config"]
 
-    def __init__(self, message, status=None):
-        super().__init__(message)
-        self.message = message
-        self.status = status
+    try:
+        cfg = load_config()
+    except (OSError, yaml.YAMLError) as exc:
+        log.error("Could not load configuration: %s", exc)
+        return _config_cache["config"] or {}
+
+    _config_cache["config"] = cfg
+    _config_cache["stamp"] = stamp
+    return cfg
 
 
-def extract_content(data):
-    """Pull the reply text out of an OpenRouter-compatible response."""
-    if not isinstance(data, dict):
-        return None
-    choices = data.get("choices")
-    if isinstance(choices, list) and choices:
-        choice = choices[0]
-        if isinstance(choice, dict):
-            message = choice.get("message")
-            if isinstance(message, dict):
-                content = message.get("content")
-                if isinstance(content, str):
-                    return content
-            delta = choice.get("delta")
-            if isinstance(delta, dict) and isinstance(delta.get("content"), str):
-                return delta["content"]
-            if isinstance(choice.get("text"), str):
-                return choice["text"]
-    if isinstance(data.get("content"), str):
-        return data["content"]
-    return None
+# ---------------------------------------------------------------------------
+# Environment / value normalization.
+# ---------------------------------------------------------------------------
+def _env_raw(*names):
+    """Return (value, name) for the first non-blank environment variable."""
+    for name in names:
+        value = os.environ.get(name)
+        if value is not None and value.strip():
+            return value, name
+    return "", ""
+
+
+def _clean_str(value):
+    """Coerce a value into a trimmed string, dropping stray quotes/newlines."""
+    if value is None:
+        return ""
+    text = str(value).replace("\r", "").replace("\n", "").strip()
+    # Strip one layer of matching surrounding quotes (common copy/paste result).
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"', "`"):
+        text = text[1:-1].strip()
+    return text
+
+
+def _normalize_api_key(value):
+    """Return ``(key, notes)`` after removing common deployment mistakes.
+
+    This is the fix for OpenRouter's "User not found." error. A key that is
+    pasted into a dashboard often arrives as ``Bearer sk-or-...``, wrapped in
+    quotes, split across lines, or with a stray ``Authorization:`` prefix.
+    Those forms all make OpenRouter reject the request. We normalize the value
+    so the browser always sends exactly one ``Bearer <key>`` header.
+    """
+    notes = []
+    raw = "" if value is None else str(value)
+    key = _clean_str(raw)
+    if key != raw.strip():
+        notes.append("stripped whitespace/newlines/quotes")
+
+    # A pasted whole header value: "Authorization: Bearer sk-or-...".
+    if ":" in key:
+        head, _, tail = key.partition(":")
+        if head.strip().lower() == "authorization":
+            key = _clean_str(tail)
+            notes.append("removed 'Authorization:' prefix")
+
+    # A pasted scheme without the header name: "Bearer sk-or-...".
+    if key[:6].lower() == "bearer":
+        stripped = _clean_str(key[6:])
+        if stripped:
+            key = stripped
+            notes.append("removed 'Bearer' prefix")
+
+    # A URL-encoded key (e.g. a trailing %0A newline from a CI variable).
+    if "%" in key:
+        decoded = unquote(key)
+        if decoded != key:
+            key = _clean_str(decoded)
+            notes.append("url-decoded")
+
+    return key, notes
+
+
+def _resolve_value(env_names, file_value):
+    """Environment variable takes priority, then the config file value."""
+    raw, _ = _env_raw(*env_names)
+    if raw:
+        return _clean_str(raw)
+    return _clean_str(file_value)
+
+
+def _mask_secret(value):
+    """A safe, non-reversible fingerprint for logs (never the full secret)."""
+    if not value:
+        return "(empty)"
+    if len(value) <= 8:
+        return "*" * len(value)
+    return "%s...%s (len=%d)" % (value[:7], value[-4:], len(value))
+
+
+def _looks_local(url):
+    """True when a URL points at localhost / a local-only host."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return True
+    if not host:
+        return True
+    return host in ("localhost", "127.0.0.1", "0.0.0.0", "::1") or host.endswith(
+        ".local"
+    )
+
+
+def _to_int(value, fallback):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+_last_diag_signature = None
+
+
+def _log_diagnostics(diag):
+    """Log a masked, actionable summary whenever the AI config changes."""
+    global _last_diag_signature
+    signature = (
+        diag["key_source"],
+        _mask_secret(diag["api_key"]),
+        diag["endpoint"],
+        diag["model"],
+        tuple(diag["fallbacks"]),
+        tuple(diag["issues"]),
+        tuple(diag["key_notes"]),
+    )
+    if signature == _last_diag_signature:
+        return
+    _last_diag_signature = signature
+
+    log.info(
+        "AI config: key_source=%s key=%s endpoint=%s model=%s fallbacks=%d configured=%s",
+        diag["key_source"],
+        _mask_secret(diag["api_key"]),
+        diag["endpoint"] or "(empty)",
+        diag["model"] or "(empty)",
+        len(diag["fallbacks"]),
+        diag["configured"],
+    )
+    if diag["key_notes"]:
+        log.info(
+            "AI config: normalized API key (fixes 'User not found'): %s",
+            "; ".join(diag["key_notes"]),
+        )
+    for issue in diag["issues"]:
+        log.warning("AI config problem: %s", issue)
+
+
+def resolve_ai_config(cfg, referer=None):
+    """Build the AI settings the browser needs to call the provider.
+
+    Environment variables take priority over config.yml so a Vercel deployment
+    (where the file may be read-only) is fully configurable through project
+    environment variables. Values are normalized and validated here so the
+    frontend never receives an empty, malformed or double-prefixed key.
+    """
+    ai = cfg.get("ai") or {}
+    app_cfg = cfg.get("app") or {}
+
+    # --- API key: env first, then the config file, then normalized ---
+    raw_key, env_key_name = _env_raw("OPENROUTER_API_KEY", "DEFFEN_API_KEY")
+    if raw_key:
+        api_key, key_notes = _normalize_api_key(raw_key)
+        key_source = "env:%s" % env_key_name
+    else:
+        api_key, key_notes = _normalize_api_key(ai.get("api_key"))
+        key_source = "config-file" if api_key else "none"
+
+    endpoint = _resolve_value(
+        ("OPENROUTER_API_URL", "OPENROUTER_ENDPOINT"), ai.get("endpoint")
+    )
+    model = _resolve_value(("OPENROUTER_MODEL", "DEFFEN_MODEL"), ai.get("model"))
+
+    # --- Fallback endpoints (never localhost on a deployment) ---
+    fallbacks = []
+    env_fallbacks, _ = _env_raw("OPENROUTER_FALLBACKS", "DEFFEN_FALLBACKS")
+    if env_fallbacks:
+        candidates = env_fallbacks.split(",")
+    else:
+        candidates = ai.get("fallbacks") or []
+    seen = {endpoint}
+    for url in candidates:
+        cleaned = _clean_str(url)
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            fallbacks.append(cleaned)
+
+    timeout_ms = _to_int(
+        _resolve_value(("OPENROUTER_TIMEOUT_MS", "DEFFEN_TIMEOUT_MS"), ai.get("timeout_ms")),
+        120000,
+    )
+
+    system_prompt = _resolve_value(
+        ("OPENROUTER_SYSTEM_PROMPT", "DEFFEN_SYSTEM_PROMPT"), ai.get("system_prompt")
+    )
+
+    referer = _resolve_value(
+        ("OPENROUTER_REFERER",), app_cfg.get("owner_website") or referer
+    )
+    title = _resolve_value(("OPENROUTER_TITLE",), app_cfg.get("name")) or "Deffen AI"
+
+    # --- Validation: explains a real problem instead of masking the error ---
+    issues = []
+    if not api_key:
+        issues.append(
+            "api_key is empty - set OPENROUTER_API_KEY (Vercel env) or ai.api_key "
+            "in config.local.yml"
+        )
+    elif not api_key.startswith("sk-or-"):
+        issues.append(
+            "api_key does not start with 'sk-or-' - it is likely not a real "
+            "OpenRouter key (currently from %s)" % key_source
+        )
+    if not endpoint:
+        issues.append("endpoint is empty - set OPENROUTER_API_URL")
+    elif _looks_local(endpoint):
+        issues.append(
+            "endpoint points at localhost (%s) - production must use "
+            "https://openrouter.ai/api/v1/chat/completions" % endpoint
+        )
+    if not model:
+        issues.append("model is empty - set OPENROUTER_MODEL")
+
+    diag = {
+        "endpoint": endpoint,
+        "fallbacks": fallbacks,
+        "api_key": api_key,
+        "model": model,
+        "timeout_ms": timeout_ms,
+        "system_prompt": system_prompt,
+        "referer": referer,
+        "title": title,
+        "max_history_messages": _to_int(app_cfg.get("max_history_messages"), 31),
+        "configured": bool(api_key and endpoint and model),
+        # Diagnostics (never sent to the browser via /api/config).
+        "key_source": key_source,
+        "key_notes": key_notes,
+        "key_format_ok": bool(api_key) and api_key.startswith("sk-or-"),
+        "issues": issues,
+    }
+    _log_diagnostics(diag)
+    return diag
 
 
 def create_app(config=None):
     """Application factory that builds and returns the Flask app."""
-    cfg = config or CONFIG
+    fixed_cfg = config
+
+    def current_cfg():
+        return fixed_cfg if fixed_cfg is not None else get_config()
 
     app = Flask(
         __name__,
@@ -166,12 +499,17 @@ def create_app(config=None):
         static_url_path="/static",
     )
     app.config["SECRET_KEY"] = (
-        cfg.get("server", {}).get("secret_key") or "dev-only-insecure-secret"
+        current_cfg().get("server", {}).get("secret_key") or "dev-only-insecure-secret"
     )
     app.config["JSON_SORT_KEYS"] = False
 
-    app_config = cfg.get("app", {}) or {}
-    ai_config = cfg.get("ai", {}) or {}
+    # Ensure Vercel's proxy headers are honoured (https + host).
+    try:  # pragma: no cover - depends on werkzeug version
+        from werkzeug.middleware.proxy_fix import ProxyFix
+
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+    except Exception:  # pragma: no cover - defensive
+        pass
 
     # ------------------------------------------------------------------
     # Security: keep server-side files unreachable and only serve an
@@ -245,6 +583,7 @@ def create_app(config=None):
     @app.context_processor
     def inject_config():
         """Inject sanitized config values into templates."""
+        app_config = current_cfg().get("app", {}) or {}
         public = {
             "app_name": app_config.get("name", "Deffen AI"),
             "app_tagline": app_config.get("tagline", ""),
@@ -265,121 +604,6 @@ def create_app(config=None):
         active_page = "chat" if endpoint == "chat_page" else "home"
         return {"app_cfg": public, "active_page": active_page}
 
-    def build_messages(raw_messages):
-        """Validate/normalize incoming messages, prepending the system prompt."""
-        if not isinstance(raw_messages, list) or not raw_messages:
-            raise BadRequest("No messages provided.")
-
-        system_prompt = (ai_config.get("system_prompt") or "").strip()
-
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-
-        for item in raw_messages:
-            if not isinstance(item, dict):
-                continue
-            role = str(item.get("role", "")).strip().lower()
-            content = str(item.get("content", "")).strip()
-            if role not in ("user", "assistant") or not content:
-                continue
-            messages.append({"role": role, "content": content})
-
-        if len(messages) <= 1:  # only the system prompt was kept
-            raise BadRequest("No valid user or assistant messages provided.")
-
-        # Keep the system prompt plus at most N most recent messages.
-        max_history = int(app_config.get("max_history_messages", 31))
-        if len(messages) > max_history:
-            messages = [messages[0], *messages[-(max_history - 1):]]
-        return messages
-
-    def fetch_once(url, api_key, model, messages, timeout, referer):
-        """POST one request to the AI endpoint and parse the reply."""
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + api_key,
-            "HTTP-Referer": referer,
-            "X-Title": app_config.get("name", "Deffen AI"),
-        }
-        payload = {"model": model, "messages": messages}
-
-        resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
-        if not resp.ok:
-            detail = ""
-            try:
-                body = resp.json()
-                err = body.get("error") if isinstance(body, dict) else None
-                if isinstance(err, dict):
-                    detail = str(err.get("message") or detail)
-            except ValueError:
-                pass
-            if not detail:
-                detail = resp.text[:240]
-            raise AIResponseError(
-                detail or ("The AI service responded with HTTP %s." % resp.status_code),
-                status=resp.status_code,
-            )
-
-        try:
-            data = resp.json()
-        except ValueError as exc:
-            raise AIResponseError(
-                "The AI service returned a malformed response."
-            ) from exc
-
-        if isinstance(data, dict) and data.get("error"):
-            err = data["error"]
-            raise AIResponseError(
-                err.get("message")
-                if isinstance(err, dict)
-                else "The AI service returned an error.",
-                status=err.get("code") if isinstance(err, dict) else None,
-            )
-
-        content = extract_content(data)
-        if content is None:
-            raise AIResponseError("The AI service returned an unexpected response.")
-        return content
-
-    def call_ai(messages):
-        """Call the primary endpoint, then any fallbacks on network errors."""
-        api_key = (ai_config.get("api_key") or "").strip()
-        model = ai_config.get("model") or ""
-        timeout_ms = int(ai_config.get("timeout_ms", 120000) or 120000)
-        timeout = timeout_ms / 1000.0
-
-        primary = (ai_config.get("endpoint") or "").strip()
-        fallbacks = [
-            u.strip()
-            for u in (ai_config.get("fallbacks") or [])
-            if isinstance(u, str) and u.strip() and u.strip() != primary
-        ]
-
-        if not api_key:
-            raise RuntimeError("AI service is not configured (missing API key).")
-        if not model:
-            raise RuntimeError("AI service is not configured (missing model).")
-        if not primary.startswith(("http://", "https://")):
-            raise RuntimeError("AI service endpoint is not configured correctly.")
-
-        referer = app_config.get("owner_website") or request.url_root
-
-        last_error = None
-        for url in [primary] + fallbacks:
-            try:
-                return fetch_once(url, api_key, model, messages, timeout, referer)
-            except requests.RequestException as exc:
-                # Only fall through to the next endpoint on network-level errors.
-                last_error = exc
-                log.warning("Network error hitting %s: %s", url, exc)
-            except AIResponseError:
-                raise  # A real API error (auth/rate limit/model) — don't mask it.
-        raise RuntimeError(
-            "Could not reach the AI service. "
-            "Please check your connection and try again."
-        ) from last_error
-
     @app.route("/")
     def home():
         """Premium welcome / landing page."""
@@ -392,44 +616,41 @@ def create_app(config=None):
 
     @app.route("/api/health")
     def health():
+        """Liveness check plus non-sensitive configuration diagnostics.
+
+        Deliberately exposes no key material — only where the key came from,
+        whether its format is acceptable and what (if anything) was wrong.
+        """
+        ai_cfg = resolve_ai_config(current_cfg(), referer=request.url_root)
+        app_config = current_cfg().get("app", {}) or {}
         return jsonify(
             {
                 "status": "ok",
                 "app": app_config.get("name", "Deffen AI"),
-                "configured": bool((ai_config.get("api_key") or "").strip()),
+                "configured": ai_cfg["configured"],
+                "key_source": ai_cfg["key_source"],
+                "key_format_ok": ai_cfg["key_format_ok"],
+                "key_notes": ai_cfg["key_notes"],
+                "endpoint": ai_cfg["endpoint"],
+                "model": ai_cfg["model"],
+                "issues": ai_cfg["issues"],
             }
         )
 
-    @app.route("/api/chat", methods=["POST"])
-    def chat():
-        payload = request.get_json(silent=True)
-        if not isinstance(payload, dict):
-            raise BadRequest("Expected a JSON body.")
+    @app.route(AI_CONFIG_ROUTE)
+    def client_config():
+        """Return only the AI settings the browser needs for its own request.
 
-        messages = build_messages(payload.get("messages"))
-        try:
-            reply = call_ai(messages)
-        except AIResponseError as exc:
-            status = exc.status if isinstance(exc.status, int) else 502
-            return jsonify({"error": exc.message}), status
-        except RuntimeError as exc:
-            return jsonify({"error": str(exc)}), 502
-        except requests.Timeout:
-            return (
-                jsonify(
-                    {
-                        "error": (
-                            "The request timed out. The model may be busy — "
-                            "please try again."
-                        )
-                    }
-                ),
-                504,
-            )
-
-        if not reply.strip():
-            return jsonify({"error": "The AI returned an empty response."}), 502
-        return jsonify({"content": reply})
+        Deliberately narrow: no server paths, secrets, diagnostics or unrelated
+        config are exposed. The response is never cached so backend edits take
+        effect immediately.
+        """
+        resolved = resolve_ai_config(current_cfg(), referer=request.url_root)
+        payload = {key: resolved[key] for key in CLIENT_CONFIG_KEYS}
+        response = jsonify(payload)
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return response
 
     return app
 
@@ -439,7 +660,7 @@ app = create_app()
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    server = CONFIG.get("server", {})
+    server = get_config().get("server", {}) or {}
     host = server.get("host", "127.0.0.1")
     port = int(server.get("port", 5000))
     debug = bool(server.get("debug", False))

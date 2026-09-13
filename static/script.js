@@ -1,11 +1,14 @@
-// Frontend configuration.
-// NOTE: All AI settings (API key, model, endpoint, system prompt) now live in
-// config.yml on the server. The browser only talks to this app's own backend,
-// so no secret is ever shipped to the client.
-const APP = {
-  CHAT_ENDPOINT: "/api/chat",
-  TIMEOUT_MS: 120000,
-};
+// Backend-provided AI configuration.
+// NOTE: No API settings (key, URL, model, system prompt, timeout) are hardcoded
+// here. They are managed by the backend (config.yml / environment variables)
+// and fetched at runtime from this app's own /api/config endpoint. The browser
+// then performs the actual AI request itself using those settings.
+const CONFIG_ENDPOINT = "/api/config";
+
+// Cached AI configuration returned by the backend (null until first loaded).
+let aiConfig = null;
+// In-flight config request, shared so concurrent callers reuse one fetch.
+let aiConfigPromise = null;
 
 const history = [];
 let busy = false;
@@ -216,6 +219,10 @@ function init() {
   updateTopbar();
   updateSettings();
   input.focus();
+
+  // Fetch the backend-managed AI settings eagerly so the first message is fast.
+  // Errors are surfaced when the user actually sends a message.
+  prefetchAiConfig().catch(() => {});
 
   // UI-only additions: theme controls + visible viewport handling
   if (themePicker && rootEl.hasAttribute("data-theme")) {
@@ -854,63 +861,226 @@ async function sendMessage(textOverride) {
 }
 
 
-// Collect the visible conversation. The server prepends the system prompt and
-// enforces the history cap defined in config.yml.
+// Collect the visible conversation and prepend the backend-managed system
+// prompt. The history cap comes from the backend config as well.
 function buildMessages() {
   const msgs = [];
+  const systemPrompt = String(aiConfig?.system_prompt ?? "").trim();
+  if (systemPrompt) msgs.push({ role: "system", content: systemPrompt });
+
   for (const m of history) {
     const content = String(m.content ?? "").trim();
     if (!content) continue;
     msgs.push({ role: m.role === "assistant" ? "assistant" : "user", content });
   }
+
+  const maxHistory = Number(aiConfig?.max_history_messages);
+  if (maxHistory > 0 && msgs.length > maxHistory) {
+    const hasSystem = msgs[0]?.role === "system";
+    const head = hasSystem ? [msgs[0]] : [];
+    const budget = hasSystem ? maxHistory - 1 : maxHistory;
+    return head.concat(msgs.slice(-Math.max(0, budget)));
+  }
   return msgs;
 }
 
-// Send the conversation to this app's own backend, which proxies the request to
-// the configured AI provider. Endpoint failover and the API key stay server-side.
-async function requestReply(messages) {
-  let res;
-  try {
-    res = await fetch(APP.CHAT_ENDPOINT, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages }),
-      signal: AbortSignal.timeout(APP.TIMEOUT_MS || 120000),
-    });
-  } catch (err) {
-    if (err && err.name === "TimeoutError") {
-      throw new Error(
-        "The request timed out. The model may be busy — please try again."
+// Fetch the AI settings that the backend owns and cache them. The backend is
+// the single source of truth; nothing here is hardcoded.
+function prefetchAiConfig() {
+  if (aiConfig) return Promise.resolve(aiConfig);
+  if (aiConfigPromise) return aiConfigPromise;
+
+  aiConfigPromise = (async () => {
+    let res;
+    try {
+      res = await fetch(CONFIG_ENDPOINT, {
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+      });
+    } catch (err) {
+      aiConfigPromise = null;
+      const e = new Error(
+        "Could not reach the assistant configuration service. " +
+          "Please check your connection and try again."
       );
+      e.isConfigError = true;
+      throw e;
     }
-    throw err;
+
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {
+      data = null;
+    }
+
+    if (!res.ok || !data) {
+      aiConfigPromise = null;
+      const e = new Error(
+        "The assistant configuration is currently unavailable. " +
+          "Please try again in a moment."
+      );
+      e.status = res.status;
+      e.isConfigError = true;
+      throw e;
+    }
+
+    if (!data.configured) {
+      aiConfigPromise = null;
+      const e = new Error(
+        "The AI assistant is not configured yet. " +
+          "The service owner needs to set the API key, URL and model."
+      );
+      e.isConfigError = true;
+      throw e;
+    }
+
+    aiConfig = data;
+    return aiConfig;
+  })();
+
+  return aiConfigPromise;
+}
+
+// Pull the human-readable error text out of a provider response body.
+function extractErrorDetail(body) {
+  if (!body) return "";
+  if (typeof body === "string") return body.slice(0, 300);
+  if (typeof body === "object") {
+    const err = body.error;
+    if (typeof err === "string") return err;
+    if (err && typeof err.message === "string") return err.message;
+    if (typeof body.message === "string") return body.message;
+    if (typeof body.detail === "string") return body.detail;
+  }
+  return "";
+}
+
+// Read a single reply text out of an OpenRouter-compatible response.
+function extractContent(data) {
+  if (!data || typeof data !== "object") return null;
+  const choices = data.choices;
+  if (Array.isArray(choices) && choices.length) {
+    const choice = choices[0];
+    if (choice && typeof choice === "object") {
+      const message = choice.message;
+      if (message && typeof message.content === "string") return message.content;
+      const delta = choice.delta;
+      if (delta && typeof delta.content === "string") return delta.content;
+      if (typeof choice.text === "string") return choice.text;
+    }
+  }
+  if (typeof data.content === "string") return data.content;
+  return null;
+}
+
+// Perform the actual AI request from the browser using backend-provided
+// settings. The endpoint failover and timeout also come from the backend.
+async function requestReply(messages) {
+  const cfg = await prefetchAiConfig();
+
+  const endpoints = [cfg.endpoint]
+    .concat(Array.isArray(cfg.fallbacks) ? cfg.fallbacks : [])
+    .filter((u) => typeof u === "string" && /^https?:\/\//i.test(u));
+
+  if (!endpoints.length) {
+    const e = new Error("The AI endpoint is not configured correctly.");
+    e.isConfigError = true;
+    throw e;
   }
 
-  let data = null;
-  try {
-    data = await res.json();
-  } catch {
-    data = null;
+  // The backend normalizes the key, but guard here too so a stray "Bearer"
+  // prefix can never produce a double-prefixed (rejected) Authorization header.
+  const apiKey = String(cfg.api_key || "")
+    .replace(/^\s*bearer\s+/i, "")
+    .trim();
+  const headers = {
+    "Content-Type": "application/json",
+    Authorization: "Bearer " + apiKey,
+  };
+  if (cfg.referer) headers["HTTP-Referer"] = cfg.referer;
+  if (cfg.title) headers["X-Title"] = cfg.title;
+
+  const timeoutMs = Number(cfg.timeout_ms) > 0 ? Number(cfg.timeout_ms) : 120000;
+  const payload = {
+    model: cfg.model,
+    messages,
+  };
+
+  let lastNetworkError = null;
+
+  for (const url of endpoints) {
+    let res;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (err) {
+      if (err && err.name === "TimeoutError") {
+        throw new Error(
+          "The request timed out. The model may be busy — please try again."
+        );
+      }
+      // Network-level failure: try the next endpoint, if any.
+      lastNetworkError = err;
+      continue;
+    }
+
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {
+      data = null;
+    }
+
+    if (!res.ok) {
+      const detail =
+        extractErrorDetail(data) ||
+        "The assistant service responded with HTTP " + res.status + ".";
+      const err = new Error(String(detail));
+      err.status = res.status;
+      throw err;
+    }
+
+    if (data && data.error) {
+      const err = new Error(
+        extractErrorDetail(data) || "The assistant returned an error."
+      );
+      if (data.error && typeof data.error.code === "number") {
+        err.status = data.error.code;
+      }
+      throw err;
+    }
+
+    const content = extractContent(data);
+    if (typeof content !== "string") {
+      throw new Error("The assistant returned an unexpected response.");
+    }
+    return content;
   }
 
-  if (!res.ok) {
-    const detail =
-      (data && (data.error || data.message)) ||
-      "The assistant service responded with HTTP " + res.status + ".";
-    const err = new Error(String(detail));
-    err.status = res.status;
-    throw err;
-  }
-
-  if (!data || typeof data.content !== "string") {
-    throw new Error("The assistant returned an unexpected response.");
-  }
-  return data.content;
+  const e = new Error(
+    "Deffen AI could not reach its assistant service. " +
+      "This is usually a temporary network issue. Please try again."
+  );
+  e.cause = lastNetworkError;
+  throw e;
 }
 
 function classifyError(err) {
   const msg = String(err?.message || err || "");
   const status = Number(err?.status) || 0;
+
+  // Backend-managed configuration could not be loaded or is incomplete.
+  if (err && err.isConfigError) {
+    return {
+      title: "Assistant unavailable",
+      detail: msg,
+    };
+  }
 
   if (status === 401 || status === 403 || /api key|apikey|invalid.*key|unauthorized|forbidden|authentication|permission/i.test(msg)) {
     return {
@@ -956,7 +1126,7 @@ function classifyError(err) {
 
   if (
     (err && err.isCors) ||
-    /failed to fetch|network|load failed|econn|offline|internet|could not reach/i.test(msg)
+    /failed to fetch|network|load failed|econn|offline|internet|could not reach|blocked by cors/i.test(msg)
   ) {
     const offline =
       typeof navigator !== "undefined" && navigator.onLine === false;
@@ -967,7 +1137,8 @@ function classifyError(err) {
     } else {
       detail =
         "Deffen AI could not reach its assistant service. This is usually a temporary " +
-        "network issue. Please check your connection and try again.";
+        "network issue — or the browser was blocked from calling the AI service directly. " +
+        "Please check your connection and try again.";
     }
     detail += "\n\n" + msg;
     return { title: "Connection error", detail };

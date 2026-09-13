@@ -1,9 +1,24 @@
 # =============================================================================
 # Deffen AI — Application configuration (YAML)
 # -----------------------------------------------------------------------------
-# All runtime settings for the Flask app live here. Edit this file and restart
-# the server to apply changes. The API key is used server-side only and is
-# NEVER exposed to the browser.
+# All runtime settings for the Flask app live here. This file is the backend's
+# source of truth for the AI configuration. The backend exposes the AI settings
+# to the frontend through the minimal, no-cache /api/config endpoint, and the
+# frontend then performs the AI request itself. Edit this file to change the
+# settings — it is picked up automatically (no restart needed).
+#
+# NO API KEY IS STORED HERE. Supply it through the environment instead:
+#   * Local dev : export OPENROUTER_API_KEY=...  (or use config.local.yml)
+#   * Vercel    : Project → Settings → Environment Variables (Production scope)
+#
+# Any value below can be overridden with an environment variable:
+#   OPENROUTER_API_KEY, OPENROUTER_API_URL, OPENROUTER_MODEL,
+#   OPENROUTER_FALLBACKS (comma-separated), OPENROUTER_TIMEOUT_MS,
+#   OPENROUTER_SYSTEM_PROMPT, OPENROUTER_REFERER, OPENROUTER_TITLE
+#
+# IMPORTANT: Because the browser calls the AI provider directly, the API key is
+# delivered to the browser at runtime via /api/config. Use a restricted /
+# revocable key and NEVER commit a real key to the repository.
 # =============================================================================
 
 app:
@@ -31,18 +46,30 @@ app:
   owner_website: "https://muntahi.devs.surf/"
 
 ai:
-  # OpenRouter API key — server-side only. NEVER ship this to the frontend.
+  # OpenRouter API key — intentionally left EMPTY in the tracked file.
+  # The backend reads it from OPENROUTER_API_KEY (env) first, then from here.
+  # For local development create an untracked config.local.yml, e.g.:
+  #
+  #   ai:
+  #     api_key: "sk-or-v1-your-key"
+  #
+  # ...or simply export OPENROUTER_API_KEY before running the app.
+  #
+  # WARNING: Any key pasted here is committed to git and OpenRouter will then
+  # auto-revoke it (you will get `401 User not found.`). Never put a real key
+  # in this file.
   api_key: "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"
 
-  # Primary chat completions endpoint
-  endpoint: "https://api.openrouter.ai/v1/chat/completions"
+  # Primary chat completions endpoint (override with OPENROUTER_API_URL)
+  endpoint: "https://openrouter.ai/api/v1/chat/completions"
 
-  # Fallback endpoints tried in order if a network error occurs
-  fallbacks:
-    - "https://openrouter.ai/api/v1/chat/completions"
+  # Fallback endpoints tried in order on a network error. OpenRouter has a
+  # single API host, so this is normally empty. (override with comma-separated
+  # OPENROUTER_FALLBACKS)
+  fallbacks: []
 
-  # Model identifier
-  model: "inclusionai/ling-3.0-flash-sante:free"
+  # Model identifier (override with OPENROUTER_MODEL)
+  model: "nex-agi/nex-n2.5-pro:free"
 
   # Request timeout in milliseconds
   timeout_ms: 120000
