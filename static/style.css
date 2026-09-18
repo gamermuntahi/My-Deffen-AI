@@ -1682,6 +1682,13 @@ html.vv .app {
   }
 }
 
+/* ---- Desktop: the drawer-only close (X) control never shows on the rail - */
+@media (min-width: 821px) {
+  .sidebar .sidebar-close {
+    display: none;
+  }
+}
+
 /* ---- Responsive: tablet / mobile drawer ------------------------------- */
 @media (max-width: 820px) {
   .sidebar {
