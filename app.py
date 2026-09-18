@@ -16,9 +16,11 @@ Set the following project environment variables (Production scope!):
     OPENROUTER_API_URL   = https://openrouter.ai/api/v1/chat/completions
     OPENROUTER_MODEL     = <model id>
 
-Never commit a real key. For local development you can either export the same
-variables or put them in an untracked ``config.local.yml`` file, which is
-merged on top of config.yml.
+Never commit a real key. The key is read from the process environment; for
+local development it is also loaded from an untracked ``.env`` file placed next
+to this module (see ``.env.example``), so ``OPENROUTER_API_KEY`` can live there
+instead of being exported by hand. An untracked ``config.local.yml`` is still
+supported as a second, optional override.
 """
 
 import logging
@@ -57,6 +59,94 @@ try:
 except ValueError:  # pragma: no cover - defensive
     log.setLevel(logging.INFO)
 log.propagate = False
+
+
+# ---------------------------------------------------------------------------
+# Local secrets: load a ``.env`` file (never committed) before any config is
+# read. Only the API key belongs in .env — every other AI setting comes from
+# config.yml. Variables that already exist in the real environment always win,
+# so a production/Vercel environment variable is never shadowed by a stale
+# file.
+# ---------------------------------------------------------------------------
+_DOTENV_FILE = os.path.join(BASE_DIR, ".env")
+_dotenv_logged = False
+
+
+def _env_file_path():
+    """The .env file to read (overridable for tests via DEFFEN_ENV_FILE)."""
+    return os.environ.get("DEFFEN_ENV_FILE") or _DOTENV_FILE
+
+
+def _iter_env_file(env_path):
+    """Yield ``(name, value)`` pairs from a .env file (built-in parser).
+
+    Supports blank lines, ``#`` comments, an optional ``export`` prefix and
+    single/double quoted values. Used when ``python-dotenv`` is unavailable.
+    """
+    try:
+        with open(env_path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line[:7].upper() == "EXPORT ":
+                    line = line[7:].strip()
+                name, sep, value = line.partition("=")
+                name = name.strip()
+                if not sep or not name:
+                    continue
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                    value = value[1:-1]
+                yield name, value
+    except OSError as exc:  # pragma: no cover - defensive
+        log.warning("Could not read .env file: %s", exc)
+        return
+
+
+def _load_dotenv():
+    """Populate ``os.environ`` from the local .env file.
+
+    Safe to call repeatedly (it is also retried lazily while resolving the AI
+    config), so a ``.env`` created or edited *after* the server started still
+    takes effect without a restart.
+
+    A variable that already has a real value in the environment is never
+    overwritten, but an empty placeholder (e.g. an ``OPENROUTER_API_KEY=`` line
+    filled in later) is refreshed. Uses ``python-dotenv`` when installed and
+    otherwise falls back to the built-in parser. Returns True when the file
+    exists.
+    """
+    global _dotenv_logged
+    env_path = _env_file_path()
+    if not env_path or not os.path.exists(env_path):
+        return False
+
+    # Preferred path: the real, battle-tested parser.
+    try:
+        from dotenv import dotenv_values  # type: ignore
+
+        pairs = list(dotenv_values(env_path).items())
+    except Exception:  # pragma: no cover - optional dependency / parse error
+        pairs = list(_iter_env_file(env_path))
+
+    for name, value in pairs:
+        if not name:
+            continue
+        value = "" if value is None else str(value)
+        existing = os.environ.get(name)
+        # Keep genuine environment variables; only fill in a missing value or
+        # refresh one that is still an empty placeholder.
+        if existing is None or (not existing.strip() and value.strip()):
+            os.environ[name] = value
+
+    if not _dotenv_logged:
+        log.info("Loaded environment from %s", os.path.basename(env_path))
+        _dotenv_logged = True
+    return True
+
+
+_load_dotenv()
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +491,10 @@ def resolve_ai_config(cfg, referer=None):
     app_cfg = cfg.get("app") or {}
 
     # --- API key: env first, then the config file, then normalized ---
+    # Retry the .env load lazily so a key added to .env after the server
+    # started is picked up without a restart (local development convenience).
+    if not _env_raw("OPENROUTER_API_KEY", "DEFFEN_API_KEY")[0]:
+        _load_dotenv()
     raw_key, env_key_name = _env_raw("OPENROUTER_API_KEY", "DEFFEN_API_KEY")
     if raw_key:
         api_key, key_notes = _normalize_api_key(raw_key)
@@ -611,8 +705,17 @@ def create_app(config=None):
 
     @app.route("/chat")
     def chat_page():
-        """The existing Deffen AI chat interface."""
-        return render_template("index.html")
+        """The existing Deffen AI chat interface.
+
+        The resolved AI settings are rendered straight into the page as a Jinja
+        block so the frontend does not have to hardcode anything. The same
+        values stay available from the internal ``/api/config`` endpoint, which
+        ``static/script.js`` uses as a fallback when this template is not the
+        one serving the page.
+        """
+        resolved = resolve_ai_config(current_cfg(), referer=request.url_root)
+        client_config = {key: resolved[key] for key in CLIENT_CONFIG_KEYS}
+        return render_template("index.html", client_config=client_config)
 
     @app.route("/api/health")
     def health():

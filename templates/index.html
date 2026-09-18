@@ -269,6 +269,17 @@
     </div>
   </div>
 
+  {# ---------------------------------------------------------------------
+     Server-provided AI configuration.
+     The backend resolves the settings (API key from .env / environment,
+     endpoint, model, timeout, system prompt, ...) and renders them here.
+     static/script.js reads this object first and only falls back to the
+     internal /api/config endpoint when it is absent.
+     --------------------------------------------------------------------- #}
+  <script id="deffen-config" type="application/json">
+    {{ client_config | default({}) | tojson }}
+  </script>
+
   <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
 </html>

@@ -73,7 +73,7 @@ ai:
   fallbacks: []
 
   # Model identifier (override with OPENROUTER_MODEL)
-  model: "nex-agi/nex-n2.5-pro:free"
+  model: "liquid/lfm-2.5-2.6b:free"
 
   # Request timeout in milliseconds
   timeout_ms: 120000

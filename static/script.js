@@ -1,54 +1,121 @@
 /* ============================================================================
  * DEFFEN AI — FRONTEND AI CONFIGURATION
  * ----------------------------------------------------------------------------
- * The AI request is made DIRECTLY from the browser to OpenRouter:
+ * NO API KEY IS STORED IN THIS FILE.
+ *
+ * The backend (app.py) owns the AI configuration: it reads the OpenRouter key
+ * from the server environment / an untracked .env file and hands the resolved
+ * settings to this script in one of two ways:
+ *
+ *   1. A Jinja block rendered into /chat:
+ *        <script id="deffen-config" type="application/json"> { ... } </script>
+ *   2. The internal, no-cache JSON endpoint:  GET /api/config
+ *
+ * The script prefers (1) and only falls back to (2) when the block is absent,
+ * so the same frontend keeps working when it is served without the template.
+ * Both provide the same keys:
+ *
+ *   endpoint, fallbacks, api_key, model, timeout_ms, system_prompt,
+ *   referer, title, max_history_messages, configured
+ *
+ * The actual AI request is then made DIRECTLY from the browser to OpenRouter:
  *
  *     Browser  ──>  OpenRouter API  ──>  AI response  ──>  Browser
- *
- * Nothing here goes through the Flask backend, so there is NO dependency on
- * /api/config, on a user account, on a session, or on the database. The only
- * thing that matters is that the values below are correct.
- *
- * 👉 PASTE YOUR NEW OPENROUTER API KEY BELOW (OPENROUTER_API_KEY).
- *
- * SECURITY NOTE: because this is a pure frontend, the key is visible to anyone
- * who opens the page source / network tab. Use a dedicated, rate-limited key
- * and never reuse a key that has ever been committed to a repository — such
- * keys get auto-revoked by OpenRouter and return `401 User not found.`.
  * ==========================================================================*/
-const OPENROUTER_API_KEY = "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";
 
-// OpenRouter chat-completions endpoint (correct host/path — do not change
-// unless OpenRouter publishes a new one).
-const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
+// Safe defaults — used only until the server-provided configuration arrives.
+const CONFIG_DEFAULTS = {
+  endpoint: "https://openrouter.ai/api/v1/chat/completions",
+  fallbacks: [],
+  api_key: "",
+  model: "",
+  timeout_ms: 120000,
+  system_prompt: "",
+  referer: "",
+  title: "Deffen AI",
+  max_history_messages: 31,
+  configured: false,
+};
 
-// Model identifier shown on https://openrouter.ai/models
-const OPENROUTER_MODEL = "nex-agi/nex-n2.5-pro:free";
+// The internal backend endpoint that mirrors the Jinja block.
+const CONFIG_ENDPOINT = "/api/config";
 
-// Request timeout in milliseconds.
-const REQUEST_TIMEOUT_MS = 120000;
+// Live configuration — replaced with the server values during init().
+let AI_CONFIG = Object.assign({}, CONFIG_DEFAULTS);
 
-// How many recent messages (plus the system prompt) to send to the model.
-const MAX_HISTORY_MESSAGES = 30;
+// Read the Jinja-rendered <script id="deffen-config"> JSON block, if present.
+function readInlineConfig() {
+  const node = document.getElementById("deffen-config");
+  if (!node) return null;
+  try {
+    const parsed = JSON.parse(node.textContent || "{}");
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (e) {
+    return null;
+  }
+}
 
-// Optional CORS proxy. Leave "" — OpenRouter already sends the CORS headers
-// the browser needs. Only set this if you are forced to tunnel the request.
-const CORS_PROXY = "";
+// Coerce a server payload into a fully-populated, safely-typed config object.
+function normalizeConfig(raw) {
+  const cfg = Object.assign({}, CONFIG_DEFAULTS);
+  if (!raw || typeof raw !== "object") return cfg;
 
-// System prompt — edit freely. Defines the Deffen AI identity.
-const SYSTEM_PROMPT =
-  "You are Deffen AI, an independent AI assistant powered by an external AI and created by Muntahi. " +
-  "Your owner's official website is https://muntahi.devs.surf/. " +
-  "You are not ChatGPT, OpenAI, Google Gemini, or a product of any other company. " +
-  "You are the AI assistant operating within the Deffen AI application. " +
-  "If someone asks who you are, clearly state that you are Deffen AI, an AI assistant powered through an Brilliant brain. " +
-  "If someone asks who created you, say that you were created by Muntahi and provide the owner's official website https://muntahi.devs.surf/ when relevant. " +
-  "If someone asks how you work, explain that Deffen AI sends requests through its configured AI Brilliant brain and returns the generated response to the user. " +
-  "Do not falsely claim to be a standalone model, company, or human. " +
-  "If someone asks about adult content, explain that access to such features is restricted and only available to specifically authorized users. " +
-  "Be helpful, precise, thoughtful, and honest. " +
-  "Always respond in the same language the user uses." +
-  "dont explain about you without the user asking";
+  const str = (v) => (v == null ? "" : String(v));
+  const num = (v, fallback) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  };
+
+  // Strip a stray "Bearer " prefix the same way the backend does.
+  const key = str(raw.api_key).trim().replace(/^\s*bearer\s+/i, "").trim();
+  if (key) cfg.api_key = key;
+
+  const endpoint = str(raw.endpoint).trim();
+  if (endpoint) cfg.endpoint = endpoint;
+
+  const model = str(raw.model).trim();
+  if (model) cfg.model = model;
+
+  const prompt = str(raw.system_prompt).trim();
+  if (prompt) cfg.system_prompt = prompt;
+
+  const referer = str(raw.referer).trim();
+  if (referer) cfg.referer = referer;
+
+  const title = str(raw.title).trim();
+  if (title) cfg.title = title;
+
+  if (Array.isArray(raw.fallbacks)) {
+    cfg.fallbacks = raw.fallbacks
+      .map((u) => str(u).trim())
+      .filter(Boolean);
+  }
+
+  cfg.timeout_ms = num(raw.timeout_ms, cfg.timeout_ms);
+  cfg.max_history_messages = num(
+    raw.max_history_messages,
+    cfg.max_history_messages
+  );
+  cfg.configured = !!raw.configured;
+  return cfg;
+}
+
+// Resolve the configuration: the Jinja block first, then the internal API.
+async function loadConfig() {
+  const inline = readInlineConfig();
+  if (inline) return normalizeConfig(inline);
+
+  try {
+    const res = await fetch(CONFIG_ENDPOINT, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (res.ok) return normalizeConfig(await res.json());
+  } catch (e) {
+    // Ignore — a clear "not configured" error is shown when sending a message.
+  }
+  return Object.assign({}, CONFIG_DEFAULTS);
+}
 
 const history = [];
 let busy = false;
@@ -211,7 +278,11 @@ function setupViewport() {
   vv.addEventListener("scroll", sync);
 }
 
-function init() {
+async function init() {
+  // Resolve the AI configuration (API key, model, ...) from the backend before
+  // wiring the UI, so the very first message already has everything it needs.
+  AI_CONFIG = await loadConfig();
+
   input.addEventListener("input", onInput);
   input.addEventListener("keydown", onKeydown);
   sendBtn.addEventListener("click", onSend);
@@ -901,11 +972,11 @@ async function sendMessage(textOverride) {
 
 
 // Collect the visible conversation (the existing `history` array, restored
-// from localStorage sessions) and prepend the frontend SYSTEM_PROMPT.
+// from localStorage sessions) and prepend the server-provided system prompt.
 // The system prompt is always kept; only the recent messages are capped.
 function buildMessages() {
   const msgs = [];
-  const systemPrompt = String(SYSTEM_PROMPT || "").trim();
+  const systemPrompt = String(AI_CONFIG.system_prompt || "").trim();
   if (systemPrompt) msgs.push({ role: "system", content: systemPrompt });
 
   for (const m of history) {
@@ -914,7 +985,7 @@ function buildMessages() {
     msgs.push({ role: m.role === "assistant" ? "assistant" : "user", content });
   }
 
-  const maxHistory = Number(MAX_HISTORY_MESSAGES);
+  const maxHistory = Number(AI_CONFIG.max_history_messages);
   if (maxHistory > 0 && msgs.length > maxHistory) {
     const hasSystem = msgs[0]?.role === "system";
     const head = hasSystem ? [msgs[0]] : [];
@@ -933,6 +1004,13 @@ function httpReferrer() {
   return "https://deffen.ai/";
 }
 
+// Prefer the referer configured by the backend; otherwise use the page URL.
+function configReferer() {
+  const configured = String(AI_CONFIG.referer || "").trim();
+  if (/^https?:\/\//i.test(configured)) return configured;
+  return httpReferrer();
+}
+
 // True for browser-level fetch failures (CORS, DNS, offline, connection reset)
 // rather than a structured HTTP response from OpenRouter.
 function isNetworkError(err) {
@@ -943,16 +1021,6 @@ function isNetworkError(err) {
     name === "TypeError" ||
     /failed to fetch|load failed|networkerror|network error|econn|offline|internet/i.test(msg)
   );
-}
-
-// Optional CORS-proxy URL builder (only used when CORS_PROXY is set).
-function applyProxy(baseEndpoint) {
-  const proxy = String(CORS_PROXY || "").trim();
-  if (!proxy || !/^https?:\/\//i.test(proxy)) return baseEndpoint;
-  const encoded = encodeURIComponent(baseEndpoint);
-  return proxy.includes("{url}")
-    ? proxy.replace("{url}", encoded)
-    : proxy.replace(/\/+$/, "") + "?url=" + encoded;
 }
 
 // Read a single reply text out of an OpenRouter-compatible response.
@@ -982,19 +1050,15 @@ async function fetchOnce(url, messages) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization:
-          "Bearer " +
-          String(OPENROUTER_API_KEY || "")
-            .replace(/^\s*bearer\s+/i, "")
-            .trim(),
-        "HTTP-Referer": httpReferrer(),
-        "X-Title": "Deffen AI",
+        Authorization: "Bearer " + String(AI_CONFIG.api_key || "").trim(),
+        "HTTP-Referer": configReferer(),
+        "X-Title": AI_CONFIG.title || "Deffen AI",
       },
       body: JSON.stringify({
-        model: OPENROUTER_MODEL,
+        model: AI_CONFIG.model,
         messages,
       }),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS || 120000),
+      signal: AbortSignal.timeout(AI_CONFIG.timeout_ms || 120000),
     });
   } catch (err) {
     if (err && err.name === "TimeoutError") {
@@ -1049,25 +1113,32 @@ async function fetchOnce(url, messages) {
 }
 
 // Call OpenRouter DIRECTLY from the browser (Browser -> OpenRouter -> Browser).
-// There is no backend, no /api/config, no user/session/database lookup.
-// Fallback order: configured endpoint, the canonical OpenRouter URL, then the
-// optional CORS proxy. Only network/CORS/timeout failures trigger a retry; a
-// real HTTP status is surfaced to the user immediately.
+// The endpoint list comes from the server config: the primary endpoint, its
+// declared fallbacks, then the canonical OpenRouter URL. Only network/CORS/
+// timeout failures trigger a retry; a real HTTP status is surfaced immediately.
 async function requestReply(messages) {
-  const key = String(OPENROUTER_API_KEY || "")
-    .replace(/^\s*bearer\s+/i, "")
-    .trim();
+  const key = String(AI_CONFIG.api_key || "").trim();
 
-  if (!key || key === "PASTE_NEW_KEY_HERE") {
+  if (!key) {
     const e = new Error(
-      "No OpenRouter API key is set. Open static/script.js and paste your key " +
-        'into OPENROUTER_API_KEY (replace "PASTE_NEW_KEY_HERE").'
+      "No OpenRouter API key is configured on the server. Set " +
+        "OPENROUTER_API_KEY in the .env file (or in the deployment's " +
+        "environment variables) and restart the app."
     );
     e.isConfigError = true;
     throw e;
   }
 
-  const primary = String(OPENROUTER_ENDPOINT || "").trim();
+  if (!String(AI_CONFIG.model || "").trim()) {
+    const e = new Error(
+      "No AI model is configured on the server. Set OPENROUTER_MODEL in the " +
+        ".env file (or config.yml)."
+    );
+    e.isConfigError = true;
+    throw e;
+  }
+
+  const primary = String(AI_CONFIG.endpoint || "").trim();
   if (!/^https?:\/\//i.test(primary)) {
     const e = new Error("The OpenRouter endpoint is not configured correctly.");
     e.isConfigError = true;
@@ -1075,9 +1146,11 @@ async function requestReply(messages) {
   }
 
   const endpoints = [primary];
+  for (const url of AI_CONFIG.fallbacks || []) {
+    if (url && !endpoints.includes(url)) endpoints.push(url);
+  }
   const canonical = "https://openrouter.ai/api/v1/chat/completions";
   if (!endpoints.includes(canonical)) endpoints.push(canonical);
-  if (String(CORS_PROXY || "").trim()) endpoints.push(applyProxy(primary));
 
   let lastError = null;
 
@@ -1157,7 +1230,7 @@ function classifyError(err) {
       title: "Model unavailable",
       detail:
         "OpenRouter could not find the configured model or endpoint. Check " +
-        "OPENROUTER_MODEL and OPENROUTER_ENDPOINT in static/script.js.\n\n" +
+        "OPENROUTER_MODEL / OPENROUTER_API_URL in the .env file or config.yml.\n\n" +
         msg,
     };
   }
